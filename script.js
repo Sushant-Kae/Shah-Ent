@@ -46,6 +46,33 @@ let emailJsInitialized = false;
 let inquirySending = false;
 let recaptchaWidgetId = null;
 let recaptchaLoadFailed = false;
+let pendingInquiry = null;
+let submissionStage = null;
+const submitButton = form.querySelector('[type="submit"]');
+const finishSubmission = (message) => {
+  status.textContent = message;
+  inquirySending = false;
+  pendingInquiry = null;
+  submissionStage = null;
+  submitButton.disabled = false;
+  form.removeAttribute("aria-busy");
+};
+const handleRecaptchaSuccess = (token) => {
+  if (!inquirySending || submissionStage !== "captcha" || !token) return;
+  submissionStage = "sending";
+  sendInquiry(token);
+};
+const handleRecaptchaExpired = () => {
+  if (submissionStage !== "captcha") return;
+  window.grecaptcha.reset(recaptchaWidgetId);
+  finishSubmission("The security check expired. Please send your inquiry again.");
+};
+const handleRecaptchaError = () => {
+  if (submissionStage !== "captcha") return;
+  console.error("Google reCAPTCHA verification failed.");
+  window.grecaptcha.reset(recaptchaWidgetId);
+  finishSubmission("The security check could not be completed. Please try again.");
+};
 const recaptchaScript = document.createElement("script");
 recaptchaScript.src = "https://www.google.com/recaptcha/api.js?render=explicit";
 recaptchaScript.async = true;
@@ -54,7 +81,10 @@ recaptchaScript.onload = () => {
   try {
     recaptchaWidgetId = window.grecaptcha.render($("#recaptcha"), {
       sitekey: CONFIG.recaptchaSiteKey,
-      size: matchMedia("(max-width: 420px)").matches ? "compact" : "normal"
+      size: "invisible",
+      callback: handleRecaptchaSuccess,
+      "expired-callback": handleRecaptchaExpired,
+      "error-callback": handleRecaptchaError
     });
   } catch (error) {
     recaptchaLoadFailed = true;
@@ -86,49 +116,11 @@ const getEmailJsErrorDetails = (error, privateValues = []) => {
     sdkInitialized: emailJsInitialized
   };
 };
-const rules = {
-  name: (v) => v.trim() ? "" : "Please tell us your name.",
-  contact: (v) => !v.trim() ? "Please enter an email address or phone number." : (/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v.trim()) || phone(v.trim())) ? "" : "That doesn’t look like an email or phone number.",
-  country: (v) => v.trim() ? "" : "Please enter the destination country.",
-  need: (v) => v.trim().length >= 10 ? "" : "Please describe what you need (a few words is fine)."
-};
-const check = (k) => { const f = form.elements[k], m = rules[k](f.value); $("#e-" + k).textContent = m; f.setAttribute("aria-invalid", m ? "true" : "false"); return !m; };
-Object.keys(rules).forEach((k) => form.elements[k].addEventListener("blur", () => check(k)));
-form.addEventListener("submit", async (e) => {
-  e.preventDefault();
-  if (inquirySending) return;
-  const bad = Object.keys(rules).filter((k) => !check(k));
-  status.className = "on";
-  if (bad.length) { status.textContent = `Please fix ${bad.length} field${bad.length > 1 ? "s" : ""} and try again.`; form.elements[bad[0]].focus(); return; }
-  const oversized = [...form.elements].find((field) => field.maxLength > 0 && field.value.length > field.maxLength);
-  if (oversized) {
-    const label = oversized.labels?.[0]?.textContent.trim() || "This field";
-    status.textContent = `${label} must be ${oversized.maxLength} characters or fewer.`;
-    oversized.focus();
-    return;
-  }
-  const d = Object.fromEntries(new FormData(form));
-  if (!window.emailjs) {
-    console.error("EmailJS browser SDK is unavailable; verify that its script loaded successfully.");
-    status.textContent = "The email service could not be loaded. Please try again later or contact us by phone or WhatsApp.";
-    return;
-  }
-  if (recaptchaWidgetId === null || !window.grecaptcha) {
-    status.textContent = recaptchaLoadFailed
-      ? "The security check could not be loaded. Please try again later or contact us by phone or WhatsApp."
-      : "The security check is still loading. Please wait a moment and try again.";
-    return;
-  }
-  const recaptchaToken = window.grecaptcha.getResponse(recaptchaWidgetId);
-  if (!recaptchaToken) {
-    status.textContent = "Please complete the reCAPTCHA security check before sending your inquiry.";
-    return;
-  }
-  const submitButton = form.querySelector('[type="submit"]');
-  inquirySending = true;
-  submitButton.disabled = true;
-  form.setAttribute("aria-busy", "true");
-  status.textContent = "Sending…";
+async function sendInquiry(recaptchaToken) {
+  const d = pendingInquiry;
+  if (!d) return;
+
+  status.textContent = "Sending your inquiry…";
   let failureStage = "initialization";
   let sendInvoked = false;
   const contact = d.contact.trim();
@@ -154,9 +146,9 @@ form.addEventListener("submit", async (e) => {
     await window.emailjs.send(CONFIG.emailServiceId, CONFIG.emailTemplateId, templateParams, {
       limitRate: { id: "website-inquiry", throttle: 10000 }
     });
-    status.textContent = "Thank you. Your inquiry has been sent to Shah Enterprises.";
     form.reset();
     window.grecaptcha.reset(recaptchaWidgetId);
+    finishSubmission("Thank you. Your inquiry has been sent to Shah Enterprises.");
   } catch (error) {
     const details = getEmailJsErrorDetails(error, [...Object.values(d), CONFIG.emailPublicKey, CONFIG.emailServiceId, CONFIG.emailTemplateId]);
     console.error("Inquiry email delivery failed:", {
@@ -165,28 +157,75 @@ form.addEventListener("submit", async (e) => {
       ...details
     });
     const errorStatus = details.status;
-    if (errorStatus === 400 || errorStatus === 422) {
-      status.textContent = "The email service rejected this inquiry. Please contact us by phone or WhatsApp while we check the service configuration.";
+    let message;
+    if ((errorStatus === 400 || errorStatus === 422) && /\b(?:re-?captcha|captcha)\b/i.test(details.text)) {
+      message = "The security check could not be verified. Please try again. If the problem continues, contact us by phone or WhatsApp.";
+    } else if (errorStatus === 400 || errorStatus === 422) {
+      message = "The email service rejected this inquiry. Please contact us by phone or WhatsApp while we check the service configuration.";
     } else if (errorStatus === 401 || errorStatus === 403) {
-      status.textContent = "The email service needs administrator attention. Please contact us by phone or WhatsApp.";
+      message = "The email service needs administrator attention. Please contact us by phone or WhatsApp.";
     } else if (errorStatus === 404) {
-      status.textContent = "The email service or template could not be found. Please contact us by phone or WhatsApp.";
+      message = "The email service or template could not be found. Please contact us by phone or WhatsApp.";
     } else if (errorStatus === 429) {
-      status.textContent = "The email service is temporarily limiting requests. Please wait a moment and try again.";
+      message = "The email service is temporarily limiting requests. Please wait a moment and try again.";
     } else if (errorStatus !== null && errorStatus >= 500) {
-      status.textContent = "The email service is temporarily unavailable. Please try again later or contact us by phone or WhatsApp.";
+      message = "The email service is temporarily unavailable. Please try again later or contact us by phone or WhatsApp.";
     } else if (failureStage === "initialization") {
-      status.textContent = "The email service could not be initialized. Please try again later or contact us by phone or WhatsApp.";
+      message = "The email service could not be initialized. Please try again later or contact us by phone or WhatsApp.";
     } else {
-      status.textContent = "We couldn’t reach the email service. Check your connection and try again, or contact us by phone or WhatsApp.";
+      message = "We couldn’t reach the email service. Check your connection and try again, or contact us by phone or WhatsApp.";
     }
     if (sendInvoked && window.grecaptcha && recaptchaWidgetId !== null) {
       window.grecaptcha.reset(recaptchaWidgetId);
     }
-  } finally {
-    inquirySending = false;
-    submitButton.disabled = false;
-    form.removeAttribute("aria-busy");
+    finishSubmission(message);
+  }
+}
+const rules = {
+  name: (v) => v.trim() ? "" : "Please tell us your name.",
+  contact: (v) => !v.trim() ? "Please enter an email address or phone number." : (/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v.trim()) || phone(v.trim())) ? "" : "That doesn’t look like an email or phone number.",
+  country: (v) => v.trim() ? "" : "Please enter the destination country.",
+  need: (v) => v.trim().length >= 10 ? "" : "Please describe what you need (a few words is fine)."
+};
+const check = (k) => { const f = form.elements[k], m = rules[k](f.value); $("#e-" + k).textContent = m; f.setAttribute("aria-invalid", m ? "true" : "false"); return !m; };
+Object.keys(rules).forEach((k) => form.elements[k].addEventListener("blur", () => check(k)));
+form.addEventListener("submit", (e) => {
+  e.preventDefault();
+  if (inquirySending) return;
+  const bad = Object.keys(rules).filter((k) => !check(k));
+  status.className = "on";
+  if (bad.length) { status.textContent = `Please fix ${bad.length} field${bad.length > 1 ? "s" : ""} and try again.`; form.elements[bad[0]].focus(); return; }
+  const oversized = [...form.elements].find((field) => field.maxLength > 0 && field.value.length > field.maxLength);
+  if (oversized) {
+    const label = oversized.labels?.[0]?.textContent.trim() || "This field";
+    status.textContent = `${label} must be ${oversized.maxLength} characters or fewer.`;
+    oversized.focus();
+    return;
+  }
+  const d = Object.fromEntries(new FormData(form));
+  if (!window.emailjs) {
+    console.error("EmailJS browser SDK is unavailable; verify that its script loaded successfully.");
+    status.textContent = "The email service could not be loaded. Please try again later or contact us by phone or WhatsApp.";
+    return;
+  }
+  if (recaptchaWidgetId === null || !window.grecaptcha) {
+    status.textContent = recaptchaLoadFailed
+      ? "The security check could not be loaded. Please try again later or contact us by phone or WhatsApp."
+      : "The security check is still loading. Please wait a moment and try again.";
+    return;
+  }
+  inquirySending = true;
+  pendingInquiry = d;
+  submissionStage = "captcha";
+  submitButton.disabled = true;
+  form.setAttribute("aria-busy", "true");
+  status.textContent = "Verifying security check…";
+  try {
+    window.grecaptcha.execute(recaptchaWidgetId);
+  } catch (error) {
+    console.error("Google reCAPTCHA could not be started:", error?.name || "Unknown error");
+    window.grecaptcha.reset(recaptchaWidgetId);
+    finishSubmission("The security check could not be started. Please try again.");
   }
 });
 
