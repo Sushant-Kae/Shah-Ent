@@ -126,4 +126,5 @@ html{scrollbar-gutter:stable}html.intro,html.intro body{overflow:hidden}
 @media (prefers-reduced-motion:reduce){.ring.go{animation:none}.arc,.wa{animation:none}[data-mouse],.btn{transition:none}*{scroll-behavior:auto!important}}
 .fine-start{margin:0}
 #form .submit-button{justify-self:start}
+#recaptcha{max-width:100%;overflow:hidden}
 .foot-description{color:var(--sage)}

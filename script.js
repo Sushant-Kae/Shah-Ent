@@ -18,7 +18,8 @@ const CONFIG = {
   certification: null,               // TODO: {issuer, name, scope, validity} once the certificate is supplied. Nothing shows until then
   emailServiceId: "service_t9zxt6x",
   emailTemplateId: "template_snmntax",
-  emailPublicKey: "XR0TcGUI0QcM23sJK"
+  emailPublicKey: "XR0TcGUI0QcM23sJK",
+  recaptchaSiteKey: "6LdE7wcuAAAAANFMK4p0CmOfy3TgUzqqn6i7hJhy"
 };
 
 /*  RENDER FROM CONFIG  */
@@ -43,6 +44,28 @@ const form = $("#form"), status = $("#status");
 const phone = (v) => /^[+\d\s()\-.]+$/.test(v) && v.replace(/\D/g, "").length >= 8;
 let emailJsInitialized = false;
 let inquirySending = false;
+let recaptchaWidgetId = null;
+let recaptchaLoadFailed = false;
+const recaptchaScript = document.createElement("script");
+recaptchaScript.src = "https://www.google.com/recaptcha/api.js?render=explicit";
+recaptchaScript.async = true;
+recaptchaScript.defer = true;
+recaptchaScript.onload = () => {
+  try {
+    recaptchaWidgetId = window.grecaptcha.render($("#recaptcha"), {
+      sitekey: CONFIG.recaptchaSiteKey,
+      size: matchMedia("(max-width: 420px)").matches ? "compact" : "normal"
+    });
+  } catch (error) {
+    recaptchaLoadFailed = true;
+    console.error("Google reCAPTCHA widget could not be initialized:", error?.name || "Unknown error");
+  }
+};
+recaptchaScript.onerror = () => {
+  recaptchaLoadFailed = true;
+  console.error("Google reCAPTCHA script could not be loaded.");
+};
+document.head.append(recaptchaScript);
 const getEmailJsErrorDetails = (error, privateValues = []) => {
   const status = error?.status ?? error?.response?.status ?? error?.statusCode;
   const text = error?.text ?? error?.response?.text ?? error?.message ?? error?.response?.data?.message;
@@ -90,6 +113,17 @@ form.addEventListener("submit", async (e) => {
     status.textContent = "The email service could not be loaded. Please try again later or contact us by phone or WhatsApp.";
     return;
   }
+  if (recaptchaWidgetId === null || !window.grecaptcha) {
+    status.textContent = recaptchaLoadFailed
+      ? "The security check could not be loaded. Please try again later or contact us by phone or WhatsApp."
+      : "The security check is still loading. Please wait a moment and try again.";
+    return;
+  }
+  const recaptchaToken = window.grecaptcha.getResponse(recaptchaWidgetId);
+  if (!recaptchaToken) {
+    status.textContent = "Please complete the reCAPTCHA security check before sending your inquiry.";
+    return;
+  }
   const submitButton = form.querySelector('[type="submit"]');
   inquirySending = true;
   submitButton.disabled = true;
@@ -107,7 +141,8 @@ form.addEventListener("submit", async (e) => {
     product: d.product.trim() || "Not specified",
     requirements: d.need.trim(),
     reply_to: emailAddress,
-    email_subject: `New Business Inquiry – ${d.product.trim() || "Product not specified"}`
+    email_subject: `New Business Inquiry – ${d.product.trim() || "Product not specified"}`,
+    "g-recaptcha-response": recaptchaToken
   };
   try {
     if (!emailJsInitialized) {
@@ -121,6 +156,7 @@ form.addEventListener("submit", async (e) => {
     });
     status.textContent = "Thank you. Your inquiry has been sent to Shah Enterprises.";
     form.reset();
+    window.grecaptcha.reset(recaptchaWidgetId);
   } catch (error) {
     const details = getEmailJsErrorDetails(error, [...Object.values(d), CONFIG.emailPublicKey, CONFIG.emailServiceId, CONFIG.emailTemplateId]);
     console.error("Inquiry email delivery failed:", {
@@ -143,6 +179,9 @@ form.addEventListener("submit", async (e) => {
       status.textContent = "The email service could not be initialized. Please try again later or contact us by phone or WhatsApp.";
     } else {
       status.textContent = "We couldn’t reach the email service. Check your connection and try again, or contact us by phone or WhatsApp.";
+    }
+    if (sendInvoked && window.grecaptcha && recaptchaWidgetId !== null) {
+      window.grecaptcha.reset(recaptchaWidgetId);
     }
   } finally {
     inquirySending = false;
